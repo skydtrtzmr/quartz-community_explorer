@@ -7,8 +7,8 @@ export default defineConfig({
     include: ["test/**/*.test.ts"],
     reporters: ["default"],
     alias: {
-      "./styles/explorer.scss": path.resolve(__dirname, "test/__mocks__/styleMock.ts"),
-      "./scripts/explorer.inline.ts": path.resolve(__dirname, "test/__mocks__/scriptMock.ts"),
+      "./styles/explorer-pro.scss": path.resolve(__dirname, "test/__mocks__/styleMock.ts"),
+      "./scripts/explorer-pro.inline.ts": path.resolve(__dirname, "test/__mocks__/scriptMock.ts"),
     },
   },
   esbuild: {

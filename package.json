@@ -1,7 +1,7 @@
 {
-  "name": "@quartz-community/explorer",
+  "name": "explorer-pro",
   "version": "1.0.0",
-  "description": "Explorer component for Quartz - navigate your content with an interactive file tree.",
+  "description": "Explorer component for Quartz (Pro fork) - flat virtual-scrolled file tree ported from v4 Explorer2, with sort config and hide-files toggle.",
   "type": "module",
   "license": "MIT",
   "author": "Quartz Community",
@@ -83,18 +83,25 @@
     "@changesets/cli": "^2.29.2"
   },
   "quartz": {
-    "name": "explorer",
-    "displayName": "Explorer",
+    "name": "explorer-pro",
+    "displayName": "Explorer Pro",
     "category": "component",
     "version": "1.0.0",
     "quartzVersion": ">=5.0.0",
     "dependencies": [],
     "defaultOrder": 50,
-    "defaultEnabled": true,
+    "defaultEnabled": false,
     "defaultOptions": {
       "folderDefaultState": "collapsed",
       "folderClickBehavior": "link",
-      "useSavedState": true
+      "useSavedState": true,
+      "virtualScrollWindowSize": 50,
+      "hideFiles": false,
+      "sort": {
+        "type": "natural",
+        "order": "asc",
+        "field": "title"
+      }
     },
     "components": {
       "Explorer": {
@@ -123,6 +130,15 @@
       },
       "useSavedState": {
         "type": "boolean"
+      },
+      "virtualScrollWindowSize": {
+        "type": "number"
+      },
+      "hideFiles": {
+        "type": "boolean"
+      },
+      "sort": {
+        "type": "object"
       }
     }
   },
