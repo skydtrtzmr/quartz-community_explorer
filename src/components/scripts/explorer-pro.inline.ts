@@ -61,6 +61,28 @@ function getHref(slug: string): string {
   return basePath ? `/${basePath}/${slug}` : `/${slug}`
 }
 
+// 构建时间元数据：等价于 v4 页面注入的 fetchMetadata 全局——请求只发一次并在页面加载时预热，
+// 后续每次导航复用同一个已 resolve 的 promise，避免"等网络往返 → 侧栏空白 → 再渲染"造成的闪烁。
+let serverBuildTimePromise: Promise<string> | null = null
+let serverBuildTimeUrl = ""
+
+function getServerBuildTime(): Promise<string> {
+  const metaUrl = basePath ? `/${basePath}/static/metadata.json` : "/static/metadata.json"
+  if (!serverBuildTimePromise || serverBuildTimeUrl !== metaUrl) {
+    serverBuildTimeUrl = metaUrl
+    serverBuildTimePromise = fetch(metaUrl, { cache: "no-cache" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((metadata: { lastBuildTime?: unknown } | null) => {
+        if (metadata?.lastBuildTime !== undefined && metadata?.lastBuildTime !== null) {
+          return String(metadata.lastBuildTime)
+        }
+        return "unknown"
+      })
+      .catch(() => "unknown")
+  }
+  return serverBuildTimePromise
+}
+
 /**
  * 切换整个 Explorer 面板的展开/折叠状态
  * 主要用于移动端的菜单切换
@@ -1109,21 +1131,9 @@ async function setupExplorer3(currentSlug: FullSlug) {
     // 保存全局配置
     globalOpts = opts
 
-    // v5 页面没有 fetchMetadata 全局，改为自行请求 static/metadata.json（content-index-pro 产出）。
-    // 拿不到时用 "unknown" 兜底：同一次会话内仍视为一致，SPA 快速复用路径不受影响。
-    let serverBuildTime = "unknown"
-    try {
-      const metaUrl = basePath ? `/${basePath}/static/metadata.json` : "/static/metadata.json"
-      const res = await fetch(metaUrl)
-      if (res.ok) {
-        const metadata = (await res.json()) as { lastBuildTime?: unknown }
-        if (metadata?.lastBuildTime !== undefined && metadata?.lastBuildTime !== null) {
-          serverBuildTime = String(metadata.lastBuildTime)
-        }
-      }
-    } catch {
-      // metadata 不可用时跳过构建时间校验
-    }
+    // 复用预热好的 metadata promise（首次拿不到时用 "unknown" 兜底：
+    // 同一次会话内仍视为一致，SPA 快速复用路径不受影响）
+    const serverBuildTime = await getServerBuildTime()
     const cachedBuildTime = sessionStorage.getItem("explorer3LastBuildTime")
 
     if (cachedBuildTime !== serverBuildTime) {
@@ -1351,6 +1361,14 @@ function printPerformance() {
       console.log(`  - ${m.name}: ${entry.duration.toFixed(2)}ms (${percent}%)`)
     }
   }
+}
+
+// 脚本（页面）加载后立刻预热 metadata 请求：与 v4 页面注入的 fetchMetadata 等价，
+// 这样首次导航时 promise 通常已 resolve，不会出现"等网络 → 侧栏空白"的闪烁。
+if (typeof document !== "undefined") {
+  const firstExplorer = document.querySelector("div.explorer3") as HTMLElement | null
+  basePath = firstExplorer?.dataset.basepath || ""
+  void getServerBuildTime()
 }
 
 // 步骤 4：保存滚动位置（参考 explorer2）
