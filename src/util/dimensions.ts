@@ -53,6 +53,157 @@ export interface DimensionFieldNode {
 /** 与 aggregation-page-pro 的 DIMENSIONS_PREFIX 保持一致 */
 export const DIMENSIONS_PREFIX = "_dimensions"
 
+// ========== 用户配置的「目录内聚合层级」==========
+// 约定：候选字段只能是该目录规则链上的字段（维度页是构建期产物）；
+// 用户配置 = 字段名数组（优先级从高到低），只有**前 maxLevels 个**真正参与分区。
+// 存储（localStorage）与键名由运行期脚本负责，这里只做纯逻辑。
+
+/**
+ * 解析 localStorage 里的顺序配置：任何非法输入都当作"未配置"（返回空数组），
+ * 并顺手去重、去空、去非字符串。
+ */
+export function parseStoredOrder(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    const order: string[] = []
+    for (const item of parsed) {
+      if (typeof item !== "string") continue
+      const field = item.trim()
+      if (field.length === 0 || order.includes(field)) continue
+      order.push(field)
+    }
+    return order
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 实际参与分区的字段顺序。
+ *
+ * - **有用户配置**：以用户顺序为准，链外字段直接丢弃；未出现在配置里的链上字段视为"未启用"
+ * - **无用户配置**：用 YAML 规则链的顺序（即"默认取链上前 N 项"）
+ * - 最后按 `maxLevels` 截断（下限 1）
+ */
+export function resolveDimensionOrder(
+  chain: string[],
+  stored: string[],
+  maxLevels: number,
+): string[] {
+  const cap = Math.max(1, Math.floor(maxLevels) || 1)
+  const take = (fields: string[]) => fields.filter((field) => chain.includes(field)).slice(0, cap)
+  return stored.length === 0 ? take(chain) : take(stored)
+}
+
+/** 某个维度值要“收纳”的直属子项（用于把值渲染成含内容的子文件夹） */
+export interface DimensionPartitionValue {
+  value: string
+  /** 维度值页 slug */
+  slug: string
+  /** 收纳的直属子项数 */
+  count: number
+  /** 收纳的直属子项 slug（文件） */
+  members: string[]
+}
+
+/** 目录直属子项按「主维度」的分区结果 */
+export interface DimensionPartition {
+  field: string
+  fieldSlug: string
+  indexSlug: string
+  /** 按收纳数量降序、同数按值升序 */
+  values: DimensionPartitionValue[]
+  /** 该字段为空 / 取值不在清单里 / 超出上限 → 保持为目录的直接子项 */
+  unassigned: string[]
+  /** 参与分区的直属子项（文件）总数 */
+  total: number
+  /** 因超出上限而未成为子文件夹的取值数 */
+  hiddenValues: number
+}
+
+/**
+ * 把目录的**直属子项**按规则链里第一个「有可用取值」的字段分区。
+ *
+ * 与 `planFolderDimensions` 的区别（两者用途不同）：
+ * - `planFolderDimensions`：**子树**口径的计数，用于「字段/取值 → 页面」的链接节点
+ * - 本函数：**直属子项**口径的归属，用于把取值渲染成"装着子文件的子文件夹"
+ *
+ * 只按第一个有取值的字段分区，是因为一个子项只能待在一个子文件夹里（不能同时归到两个维度）；
+ * 其余维度仍以链接节点形式提供入口。分不到任何取值的子项（属性为空/未分类/超出上限）留在目录下。
+ */
+export function planFolderPartition(
+  entries: DimensionEntry[],
+  shared: SharedAggregationArtifact | null,
+  manifest: DimensionManifest | null,
+  folder: string,
+  childSlugs: string[],
+  maxValues: number = DEFAULT_DIMENSION_MAX_VALUES,
+): DimensionPartition | null {
+  if (!shared?.resolved || folder === "" || childSlugs.length === 0) return null
+
+  const context = contextOfFolder(folder, shared.root?.depth ?? 1)
+  const chain = fieldChain(shared.resolved[context])
+  if (chain.length === 0) return null
+
+  const frontmatterBySlug = new Map<string, Record<string, unknown> | undefined>()
+  for (const entry of entries) frontmatterBySlug.set(entry.slug, entry.frontmatter)
+
+  const manifestByField = new Map<string, Map<string, string>>()
+  const fieldSlugs = new Map<string, string>()
+  for (const field of manifest?.fields ?? []) {
+    fieldSlugs.set(field.field, field.fieldSlug)
+    const values = new Map<string, string>()
+    for (const value of field.values ?? []) values.set(value.value, value.valueSlug)
+    manifestByField.set(field.field, values)
+  }
+
+  for (const field of chain) {
+    const valueSlugs = manifestByField.get(field)
+    if (!valueSlugs) continue
+
+    const buckets = new Map<string, string[]>()
+    let assigned = 0
+    for (const slug of childSlugs) {
+      const value = firstValue(frontmatterBySlug.get(slug)?.[field])
+      if (value === null) continue
+      const valueSlug = valueSlugs.get(value)
+      if (valueSlug === undefined) continue
+      const bucket = buckets.get(value) ?? []
+      bucket.push(slug)
+      buckets.set(value, bucket)
+      assigned++
+    }
+    if (assigned === 0) continue
+
+    const fieldSlug = fieldSlugs.get(field) ?? slugifyPath(field)
+    const all = [...buckets.entries()]
+      .map(([value, members]) => ({
+        value,
+        members,
+        count: members.length,
+        slug: `${DIMENSIONS_PREFIX}/${fieldSlug}/${valueSlugs.get(value)!}`,
+      }))
+      .sort((a, b) => b.count - a.count || compareStrings(a.value, b.value))
+
+    const shown = all.slice(0, maxValues)
+    const shownSlugs = new Set(shown.flatMap((entry) => entry.members))
+    // 超出上限的取值：其成员收回目录直接子项，避免"文件消失"
+    const unassigned = childSlugs.filter((slug) => !shownSlugs.has(slug))
+    return {
+      field,
+      fieldSlug,
+      indexSlug: `${DIMENSIONS_PREFIX}/${fieldSlug}/index`,
+      values: shown,
+      unassigned,
+      total: childSlugs.length,
+      hiddenValues: Math.max(0, all.length - shown.length),
+    }
+  }
+  return null
+}
+
 /** 单字段最多展示的取值数（默认 20），避免高基数字段把树撑爆 */
 export const DEFAULT_DIMENSION_MAX_VALUES = 20
 
@@ -161,4 +312,156 @@ export function planFolderDimensions(
     })
   }
   return nodes
+}
+
+// ========== 多层嵌套分区（用户配置的层级顺序）==========
+
+/** 一个取值节点：本层的一个取值，可继续往下按下一个字段分区 */
+export interface PartitionValueNode {
+  /** 本节点使用的字段（用于展开键、链接） */
+  field: string
+  fieldSlug: string
+  value: string
+  /** 维度值页 slug（`_dimensions/<fieldSlug>/<valueSlug>`） */
+  slug: string
+  /** 本节点（含更深层级）收纳的直属子项数 */
+  count: number
+  /** 直接放在本节点下的子项（更深层级未命中的 + 最深层级的全部） */
+  members: string[]
+  /** 更深层级（按 `fields[k+1]`）；空数组表示到底了 */
+  children: PartitionValueNode[]
+  /** 更深层级里因取值上限被截断的取值数 */
+  hiddenValues: number
+}
+
+export interface FolderPartition {
+  /** 实际应用的字段顺序（已过滤链外字段、已按上限截断） */
+  fields: string[]
+  values: PartitionValueNode[]
+  /** 目录下保留（未参与分区）的直属子项 */
+  leftovers: string[]
+  /** 参与分区的直属子项总数 */
+  total: number
+}
+
+interface LevelResult {
+  values: PartitionValueNode[]
+  leftovers: string[]
+  hiddenValues: number
+}
+
+/** 递归分区的一层：把 items 按 fields[0] 分组，组内再按后续字段继续分 */
+function partitionLevel(
+  items: string[],
+  frontmatter: Map<string, Record<string, unknown> | undefined>,
+  fields: string[],
+  manifestByField: Map<string, Map<string, string>>,
+  fieldSlugs: Map<string, string>,
+  maxValues: number,
+): LevelResult {
+  const field = fields[0]
+  const valueSlugs = field === undefined ? undefined : manifestByField.get(field)
+  if (field === undefined || valueSlugs === undefined) {
+    return { values: [], leftovers: items, hiddenValues: 0 }
+  }
+
+  const buckets = new Map<string, string[]>()
+  const leftovers: string[] = []
+  for (const slug of items) {
+    const value = firstValue(frontmatter.get(slug)?.[field])
+    if (value === null) {
+      leftovers.push(slug) // 属性为空 → 留在本层父节点
+      continue
+    }
+    const valueSlug = valueSlugs.get(value)
+    if (valueSlug === undefined) {
+      leftovers.push(slug) // 取值不在清单里（字段被上限跳过等）→ 同样留在本层父节点
+      continue
+    }
+    const bucket = buckets.get(value) ?? []
+    bucket.push(slug)
+    buckets.set(value, bucket)
+  }
+  if (buckets.size === 0) return { values: [], leftovers: items, hiddenValues: 0 }
+
+  const fieldSlug = fieldSlugs.get(field) ?? slugifyPath(field)
+  const sorted = [...buckets.entries()].sort(
+    (a, b) => b[1].length - a[1].length || compareStrings(a[0], b[0]),
+  )
+  const shown = sorted.slice(0, maxValues)
+  const hidden = sorted.slice(maxValues)
+  // 被上限截断的取值：其成员回落到本层父节点（不丢文件）
+  for (const [, members] of hidden) leftovers.push(...members)
+
+  const values: PartitionValueNode[] = shown.map(([value, members]) => {
+    const deeper: LevelResult =
+      fields.length > 1
+        ? partitionLevel(members, frontmatter, fields.slice(1), manifestByField, fieldSlugs, maxValues)
+        : { values: [], leftovers: members, hiddenValues: 0 }
+    return {
+      field,
+      fieldSlug,
+      value,
+      slug: `${DIMENSIONS_PREFIX}/${fieldSlug}/${valueSlugs.get(value)!}`,
+      count: members.length,
+      members: deeper.leftovers,
+      children: deeper.values,
+      hiddenValues: deeper.hiddenValues,
+    }
+  })
+
+  return { values, leftovers, hiddenValues: hidden.length }
+}
+
+/**
+ * 目录直属子项的多层嵌套分区。
+ *
+ * - `order` 由调用方给出（`resolveDimensionOrder(链, 用户配置, 上限)`），本函数不再做截断
+ * - 每一层都遵循"文件不丢"：属性为空/取值不在清单/超上限 → 留在该层父节点
+ * - 最深层级的取值节点用 `members` 收纳剩余成员；中间层级用 `children` 继续分叉
+ */
+export function planNestedPartition(
+  entries: DimensionEntry[],
+  shared: SharedAggregationArtifact | null,
+  manifest: DimensionManifest | null,
+  folder: string,
+  childSlugs: string[],
+  order: string[],
+  maxValues: number = DEFAULT_DIMENSION_MAX_VALUES,
+): FolderPartition | null {
+  if (!shared?.resolved || folder === "" || childSlugs.length === 0 || order.length === 0) {
+    return null
+  }
+
+  const frontmatter = new Map<string, Record<string, unknown> | undefined>()
+  for (const entry of entries) frontmatter.set(entry.slug, entry.frontmatter)
+
+  const manifestByField = new Map<string, Map<string, string>>()
+  const fieldSlugs = new Map<string, string>()
+  for (const field of manifest?.fields ?? []) {
+    fieldSlugs.set(field.field, field.fieldSlug)
+    const values = new Map<string, string>()
+    for (const value of field.values ?? []) values.set(value.value, value.valueSlug)
+    manifestByField.set(field.field, values)
+  }
+
+  // 逐层挑"确实有可用取值"的字段：本级无任何命中就顺延到下一个（例如某目录顺序里第一个字段全为空）
+  let fields = order
+  let chosen: LevelResult | null = null
+  for (let i = 0; i < order.length; i++) {
+    const candidate = partitionLevel(childSlugs, frontmatter, order.slice(i), manifestByField, fieldSlugs, maxValues)
+    if (candidate.values.length > 0) {
+      fields = order.slice(i)
+      chosen = candidate
+      break
+    }
+  }
+  if (!chosen) return null
+
+  return {
+    fields,
+    values: chosen.values,
+    leftovers: chosen.leftovers,
+    total: childSlugs.length,
+  }
 }

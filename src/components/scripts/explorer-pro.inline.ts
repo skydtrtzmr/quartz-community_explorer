@@ -1,9 +1,14 @@
 import { FileTrieNode, type ContentIndexEntry } from "../../util/fileTrie"
 import {
+  contextOfFolder,
+  fieldChain,
+  parseStoredOrder,
   planFolderDimensions,
+  planNestedPartition,
+  resolveDimensionOrder,
   type DimensionEntry,
-  type DimensionFieldNode,
   type DimensionManifest,
+  type PartitionValueNode,
   type SharedAggregationArtifact,
 } from "../../util/dimensions"
 import type { FullSlug } from "@quartz-community/types"
@@ -35,6 +40,7 @@ interface ParsedOptions {
   hideFiles: boolean // 隐藏末级文件：只显示文件夹
   dimensionFolders: boolean // 目录下是否挂「维度 → 取值」动态分类节点
   dimensionMaxValues: number // 单字段最多展示的取值数
+  dimensionMaxLevels: number // 最多应用几级维度（用户拖动的顺序只取前 N 项）
   sortFn: (a: FileTrieNode, b: FileTrieNode) => number
   filterFn: (node: FileTrieNode) => boolean
   mapFn: (node: FileTrieNode) => void
@@ -113,58 +119,102 @@ function loadDimensionSources(): Promise<DimensionSources | null> {
   return dimensionSourcesPromise
 }
 
-/** 把「字段 → 取值」计划转成树节点（字段节点表现为可展开文件夹，取值节点为叶子链接） */
-function dimensionFieldToNode(
-  plan: DimensionFieldNode,
-  folder: string,
-): FileTrieNode {
-  const query = `?scope=${encodeURIComponent(folder)}`
-  const node = {
-    isFolder: true,
-    slug: plan.indexSlug,
-    // 展开状态按「目录 + 字段」独立记忆（同一个字段挂在不同目录下不能联动）
-    expandKey: `dim:${folder}:${plan.fieldSlug}`,
-    displayName: `${plan.field} (${plan.count})`,
-    dimensionQuery: query,
-    children: [
-      ...plan.values.map((value) => ({
-        isFolder: false,
-        slug: value.slug,
-        displayName: `${value.value} (${value.count})`,
-        dimensionQuery: query,
-        children: [] as FileTrieNode[],
-      })),
-      ...(plan.hiddenValues > 0
-        ? [
-            {
-              isFolder: false,
-              slug: plan.indexSlug,
-              displayName: `… (${plan.hiddenValues})`,
-              dimensionQuery: query,
-              children: [] as FileTrieNode[],
-            },
-          ]
-        : []),
-    ],
+// ===== 「目录内聚合层级」配置（跨插件契约：aggregation-page-pro 的面板写、本脚本读）=====
+/** localStorage 键前缀：`quartz:dimensionOrder:<basePath>:<目录>`（值 = 字段名数组） */
+const DIMENSION_ORDER_PREFIX = "quartz:dimensionOrder:"
+/** 面板改配置后派发的事件（本脚本监听并重建目录树） */
+const DIMENSION_ORDER_EVENT = "aggregation-order-changed"
+
+function dimensionOrderKey(folder: string): string {
+  return `${DIMENSION_ORDER_PREFIX}${basePath}:${folder}`
+}
+
+/** 读取用户配置的顺序（容错：任何异常都当未配置） */
+function readDimensionOrder(folder: string): string[] {
+  try {
+    return parseStoredOrder(localStorage.getItem(dimensionOrderKey(folder)))
+  } catch {
+    return []
   }
-  return node as unknown as FileTrieNode
+}
+
+/** 注入前的原始子节点快照：配置变更时用它还原，避免"还原靠重建整棵树" */
+const originalChildren = new Map<string, FileTrieNode[]>()
+
+/** 最近一次注入用的源内容（配置变更重排时复用，避免重新拉取/解析 contentIndex） */
+let currentDimensionEntries: DimensionEntry[] = []
+
+/** 收集一次分区里所有被收纳的子项（含更深层级） */
+function collectAssigned(values: PartitionValueNode[]): Set<string> {
+  const assigned = new Set<string>()
+  const walk = (nodes: PartitionValueNode[]) => {
+    for (const node of nodes) {
+      for (const member of node.members) assigned.add(member)
+      walk(node.children)
+    }
+  }
+  walk(values)
+  return assigned
 }
 
 /**
- * 把「维度 → 取值」挂到每个目录节点的子节点末尾。
- * 注意：先递归原children、再追加，避免把注入的节点当成真实目录继续处理。
+ * 把（可能嵌套的）取值节点转成树节点：
+ * - `hideFiles: false`（默认）：取值 = 可展开的子文件夹，里面是命中该取值的直属文件；
+ *   若配置了二级字段，则先放二级取值子文件夹，再放本层未命中二级的文件
+ * - `hideFiles: true`（只显示目录）：渲染成叶子，点击进维度值页
+ *
+ * 展开键用「目录 + 字段层级链」组成，避免不同层级/不同目录互相联动。
+ */
+function partitionValueToTrie(
+  node: PartitionValueNode,
+  folder: string,
+  hideFiles: boolean,
+  childBySlug: Map<string, FileTrieNode>,
+  parentKey: string,
+): FileTrieNode {
+  const key = `${parentKey}/${node.fieldSlug}=${node.value}`
+  const childValueNodes = node.children.map((child) =>
+    partitionValueToTrie(child, folder, hideFiles, childBySlug, key),
+  )
+  const memberNodes = hideFiles
+    ? []
+    : node.members
+        .map((slug) => childBySlug.get(slug))
+        .filter((child): child is FileTrieNode => child !== undefined)
+  const trie = {
+    isFolder: !hideFiles || childValueNodes.length > 0,
+    slug: node.slug,
+    expandKey: `dimval:${folder}:${key}`,
+    displayName: `${node.value} (${node.count})`,
+    dimensionQuery: `?scope=${encodeURIComponent(folder)}`,
+    children: [...childValueNodes, ...memberNodes],
+  }
+  return trie as unknown as FileTrieNode
+}
+
+/**
+ * 在每个目录下按**主维度**分区：把该目录的直属文件收进「维度值子文件夹」，其余文件留在目录下。
+ *
+ * 为什么只按一个维度：一个文件只能待在一个子文件夹里（不能同时归到两个维度）。
+ * 其余维度仍可从文件夹页的「本目录维度」入口进入（将来由「目录内聚合配置」让用户选择用哪个维度）。
+ * 注意：先递归原 children、再重建，避免把注入的节点当成真实目录继续处理。
  */
 async function injectDimensionNodes(
   trie: FileTrieNode,
   entries: DimensionEntry[],
-  maxValues: number,
+  opts: ParsedOptions,
 ): Promise<number> {
   const sources = await loadDimensionSources()
-  if (!sources?.shared?.resolved) {
+  const shared = sources?.shared ?? null
+  const manifest = sources?.manifest ?? null
+  const resolved = shared?.resolved ?? null
+  if (!resolved) {
     console.log("[explorer3] 动态分类：未找到 static/aggregation.json，跳过")
     return 0
   }
+  const contextDepth = shared?.root?.depth ?? 1
 
+  currentDimensionEntries = entries
   let injected = 0
   const walk = (node: FileTrieNode) => {
     const children = [...node.children]
@@ -173,20 +223,90 @@ async function injectDimensionNodes(
     if (!node.isFolder) return
     const folder = node.slug.replace(/\/index$/, "")
     if (folder === "") return
-    const plans = planFolderDimensions(entries, sources.shared, sources.manifest, folder, maxValues)
-    if (plans.length === 0) return
 
-    // 插到「真实子文件夹之后、文件之前」：既贴近“子文件夹”的观感，
-    // 又保证在虚拟滚动的初始窗口内可见（项目目录有 60+ 文件，追加到末尾会被滚出视窗）
-    const insertAt = node.children.findIndex((child) => !child.isFolder)
-    const at = insertAt === -1 ? node.children.length : insertAt
-    const nodes = plans.map((plan) => dimensionFieldToNode(plan, folder))
-    node.children.splice(at, 0, ...nodes)
-    injected += nodes.length
+    // 原始子节点快照（第一次注入时记下）：配置变更时直接还原，无需重建整棵树
+    if (!originalChildren.has(node.slug)) originalChildren.set(node.slug, node.children)
+
+    const subFolders = node.children.filter((child) => child.isFolder)
+    const files = node.children.filter((child) => !child.isFolder)
+
+    // 本目录实际应用的字段顺序 = 用户配置（若有）→ 否则规则链，再按站点上限截断
+    const context = contextOfFolder(folder, contextDepth)
+    const chain = fieldChain(resolved[context])
+    const order = resolveDimensionOrder(chain, readDimensionOrder(folder), opts.dimensionMaxLevels)
+    if (order.length === 0) return
+
+    // 只显示目录（hideFiles）：文件已被过滤出树，按**子树**计数给出取值叶子（点击进维度值页）
+    if (opts.hideFiles) {
+      const plans = planFolderDimensions(entries, shared, manifest, folder, opts.dimensionMaxValues)
+      const primary = plans.find((plan) => plan.field === order[0]) ?? plans[0]
+      if (!primary) return
+      const leafNodes = primary.values.map((value) =>
+        partitionValueToTrie(
+          {
+            field: primary.field,
+            fieldSlug: primary.fieldSlug,
+            value: value.value,
+            slug: value.slug,
+            count: value.count,
+            members: [],
+            children: [],
+            hiddenValues: 0,
+          },
+          folder,
+          true,
+          new Map(),
+          "",
+        ),
+      )
+      node.children = [...subFolders, ...leafNodes]
+      injected += leafNodes.length
+      return
+    }
+
+    if (files.length === 0) return
+
+    const childBySlug = new Map(files.map((child) => [child.slug, child]))
+    const partition = planNestedPartition(
+      entries,
+      shared,
+      manifest,
+      folder,
+      files.map((child) => child.slug),
+      order,
+      opts.dimensionMaxValues,
+    )
+    if (!partition) return
+
+    const valueNodes = partition.values.map((value) =>
+      partitionValueToTrie(value, folder, false, childBySlug, ""),
+    )
+    const movedSlugs = collectAssigned(partition.values)
+    const remainingFiles = files.filter((child) => !movedSlugs.has(child.slug))
+
+    // 顺序：真实子文件夹 → 维度值子文件夹 → 未参与分区的文件
+    node.children = [...subFolders, ...valueNodes, ...remainingFiles]
+    injected += valueNodes.length
   }
   walk(trie)
   if (injected === 0) console.log("[explorer3] 动态分类：没有目录命中规则链")
   return injected
+}
+
+/**
+ * 配置变更后重排目录树：先还原各目录的原始子节点，再按新配置重新注入，最后重绘。
+ * 不重新 fetch 产物、不重建整棵树（产物与内容索引都有缓存）。
+ */
+async function regroupDimensionNodes(opts: ParsedOptions): Promise<void> {
+  if (!currentTrie || currentDimensionEntries.length === 0) return
+  for (const [slug, children] of originalChildren) {
+    const node = currentTrie.findNode(slug.split("/"))
+    if (node) node.children = children
+  }
+  // 丢掉旧的展开键（字段/层级可能已经变了）
+  expandedFolders = new Set([...expandedFolders].filter((key) => !key.startsWith("dimval:")))
+  await injectDimensionNodes(currentTrie, currentDimensionEntries, opts)
+  refreshFlatExplorer()
 }
 
 // 构建时间元数据：等价于 v4 页面注入的 fetchMetadata 全局——请求只发一次并在页面加载时预热，
@@ -339,7 +459,7 @@ function createSimpleFolderNode(
   const expandKey = (node as unknown as { expandKey?: string }).expandKey ?? node.slug
   const folderPath = node.slug
   folderContainer.dataset.folderpath = expandKey
-  if (dimensionQuery) li.classList.add("dimension-field-node")
+  if (dimensionQuery) li.classList.add("dimension-value-folder")
 
   // 设置缩进
   const indentPx = level * 20
@@ -1182,7 +1302,7 @@ async function initializeFileTree(opts: ParsedOptions): Promise<FileTrieNode> {
         slug,
         frontmatter: (entry as { frontmatter?: Record<string, unknown> }).frontmatter,
       }))
-    const injected = await injectDimensionNodes(trie, dimensionEntries, opts.dimensionMaxValues)
+    const injected = await injectDimensionNodes(trie, dimensionEntries, opts)
     if (injected > 0) console.log(`[explorer3] 动态分类：注入 ${injected} 个维度字段节点`)
   }
 
@@ -1287,6 +1407,7 @@ async function setupExplorer3(currentSlug: FullSlug) {
       hideFiles: explorer.dataset.hidefiles === "true",
       dimensionFolders: explorer.dataset.dimensionfolders === "true",
       dimensionMaxValues: parseInt(explorer.dataset.dimensionmaxvalues || "20", 10),
+      dimensionMaxLevels: parseInt(explorer.dataset.dimensionmaxlevels || "2", 10),
       order: dataFns.order || ["filter", "map", "sort"],
       sortFn: new Function("return " + (dataFns.sortFn || "undefined"))(),
       filterFn: new Function("return " + (dataFns.filterFn || "undefined"))(),
@@ -1295,6 +1416,13 @@ async function setupExplorer3(currentSlug: FullSlug) {
 
     // 保存全局配置
     globalOpts = opts
+
+    // 配置面板（aggregation-page-pro）改完顺序后派发事件：按新顺序重排目录树
+    const onDimensionOrderChanged = () => {
+      void regroupDimensionNodes(opts)
+    }
+    document.addEventListener(DIMENSION_ORDER_EVENT, onDimensionOrderChanged)
+    window.addCleanup(() => document.removeEventListener(DIMENSION_ORDER_EVENT, onDimensionOrderChanged))
 
     // 复用预热好的 metadata promise（首次拿不到时用 "unknown" 兜底：
     // 同一次会话内仍视为一致，SPA 快速复用路径不受影响）
