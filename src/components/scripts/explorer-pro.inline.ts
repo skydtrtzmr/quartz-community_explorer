@@ -1,4 +1,11 @@
 import { FileTrieNode, type ContentIndexEntry } from "../../util/fileTrie"
+import {
+  planFolderDimensions,
+  type DimensionEntry,
+  type DimensionFieldNode,
+  type DimensionManifest,
+  type SharedAggregationArtifact,
+} from "../../util/dimensions"
 import type { FullSlug } from "@quartz-community/types"
 
 // TODO
@@ -26,6 +33,8 @@ interface ParsedOptions {
   useSavedState: boolean
   virtualScrollWindowSize: number
   hideFiles: boolean // 隐藏末级文件：只显示文件夹
+  dimensionFolders: boolean // 目录下是否挂「维度 → 取值」动态分类节点
+  dimensionMaxValues: number // 单字段最多展示的取值数
   sortFn: (a: FileTrieNode, b: FileTrieNode) => number
   filterFn: (node: FileTrieNode) => boolean
   mapFn: (node: FileTrieNode) => void
@@ -59,6 +68,125 @@ let basePath: string = "" // 从 data-basepath 获取的子路径（如 "xm"）
 // 生成带 basePath 的链接
 function getHref(slug: string): string {
   return basePath ? `/${basePath}/${slug}` : `/${slug}`
+}
+
+// 维度节点链接：额外带 `?scope=<目录>`（与文件夹页入口、维度值页的裁剪口径一致）
+function getDimensionHref(slug: string, query: string): string {
+  return getHref(slug) + query
+}
+
+// ========== 动态分类（目录 → 维度 → 取值）==========
+// 数据来自两个站点级产物：static/aggregation.json（规则链）与 graph/dimensions/index.json（slug 清单）。
+// 站点没配 aggregation 时 aggregation.json 404 → 整体跳过（不报错、不挂任何节点）。
+interface DimensionSources {
+  shared: SharedAggregationArtifact | null
+  manifest: DimensionManifest | null
+}
+
+let dimensionSourcesPromise: Promise<DimensionSources | null> | null = null
+
+function staticUrl(relative: string): string {
+  return basePath ? `/${basePath}/${relative}` : `/${relative}`
+}
+
+function loadDimensionSources(): Promise<DimensionSources | null> {
+  if (!dimensionSourcesPromise) {
+    dimensionSourcesPromise = (async () => {
+      try {
+        const sharedResponse = await fetch(staticUrl("static/aggregation.json"))
+        if (!sharedResponse.ok) return null
+        const shared = (await sharedResponse.json()) as SharedAggregationArtifact
+        let manifest: DimensionManifest | null = null
+        try {
+          const manifestResponse = await fetch(staticUrl("graph/dimensions/index.json"))
+          if (manifestResponse.ok) manifest = (await manifestResponse.json()) as DimensionManifest
+        } catch {
+          // 清单缺失：没有 slug 映射 → planFolderDimensions 自然挂不出节点
+        }
+        return { shared, manifest }
+      } catch (error) {
+        console.warn("[explorer3] 维度分类产物加载失败", error)
+        return null
+      }
+    })()
+  }
+  return dimensionSourcesPromise
+}
+
+/** 把「字段 → 取值」计划转成树节点（字段节点表现为可展开文件夹，取值节点为叶子链接） */
+function dimensionFieldToNode(
+  plan: DimensionFieldNode,
+  folder: string,
+): FileTrieNode {
+  const query = `?scope=${encodeURIComponent(folder)}`
+  const node = {
+    isFolder: true,
+    slug: plan.indexSlug,
+    // 展开状态按「目录 + 字段」独立记忆（同一个字段挂在不同目录下不能联动）
+    expandKey: `dim:${folder}:${plan.fieldSlug}`,
+    displayName: `${plan.field} (${plan.count})`,
+    dimensionQuery: query,
+    children: [
+      ...plan.values.map((value) => ({
+        isFolder: false,
+        slug: value.slug,
+        displayName: `${value.value} (${value.count})`,
+        dimensionQuery: query,
+        children: [] as FileTrieNode[],
+      })),
+      ...(plan.hiddenValues > 0
+        ? [
+            {
+              isFolder: false,
+              slug: plan.indexSlug,
+              displayName: `… (${plan.hiddenValues})`,
+              dimensionQuery: query,
+              children: [] as FileTrieNode[],
+            },
+          ]
+        : []),
+    ],
+  }
+  return node as unknown as FileTrieNode
+}
+
+/**
+ * 把「维度 → 取值」挂到每个目录节点的子节点末尾。
+ * 注意：先递归原children、再追加，避免把注入的节点当成真实目录继续处理。
+ */
+async function injectDimensionNodes(
+  trie: FileTrieNode,
+  entries: DimensionEntry[],
+  maxValues: number,
+): Promise<number> {
+  const sources = await loadDimensionSources()
+  if (!sources?.shared?.resolved) {
+    console.log("[explorer3] 动态分类：未找到 static/aggregation.json，跳过")
+    return 0
+  }
+
+  let injected = 0
+  const walk = (node: FileTrieNode) => {
+    const children = [...node.children]
+    for (const child of children) walk(child)
+
+    if (!node.isFolder) return
+    const folder = node.slug.replace(/\/index$/, "")
+    if (folder === "") return
+    const plans = planFolderDimensions(entries, sources.shared, sources.manifest, folder, maxValues)
+    if (plans.length === 0) return
+
+    // 插到「真实子文件夹之后、文件之前」：既贴近“子文件夹”的观感，
+    // 又保证在虚拟滚动的初始窗口内可见（项目目录有 60+ 文件，追加到末尾会被滚出视窗）
+    const insertAt = node.children.findIndex((child) => !child.isFolder)
+    const at = insertAt === -1 ? node.children.length : insertAt
+    const nodes = plans.map((plan) => dimensionFieldToNode(plan, folder))
+    node.children.splice(at, 0, ...nodes)
+    injected += nodes.length
+  }
+  walk(trie)
+  if (injected === 0) console.log("[explorer3] 动态分类：没有目录命中规则链")
+  return injected
 }
 
 // 构建时间元数据：等价于 v4 页面注入的 fetchMetadata 全局——请求只发一次并在页面加载时预热，
@@ -155,17 +283,20 @@ function toggleFolder(evt: MouseEvent) {
  */
 function createFileNode(
   currentSlug: FullSlug,
-  node: { slug: FullSlug; displayName: string },
+  node: { slug: FullSlug; displayName: string; dimensionQuery?: string },
   level: number = 0,
 ): HTMLLIElement {
   const template = document.getElementById("template-file3") as HTMLTemplateElement
   const clone = template.content.cloneNode(true) as DocumentFragment
   const li = clone.querySelector("li") as HTMLLIElement
   const a = li.querySelector("a") as HTMLAnchorElement
-  // 使用 basePath 生成链接（支持子路径部署）
-  a.href = getHref(node.slug)
+  // 使用 basePath 生成链接（支持子路径部署）；维度取值节点额外带 ?scope=<目录>
+  a.href = node.dimensionQuery
+    ? getDimensionHref(node.slug, node.dimensionQuery)
+    : getHref(node.slug)
   a.dataset.for = node.slug
   a.textContent = node.displayName
+  if (node.dimensionQuery) li.classList.add("dimension-value-node")
 
   if (currentSlug === node.slug) {
     a.classList.add("active")
@@ -203,9 +334,12 @@ function createSimpleFolderNode(
   const titleContainer = folderContainer.querySelector("div") as HTMLElement
   const folderOuter = li.querySelector(".folder3-outer") as HTMLElement
 
-  // 设置文件夹路径
+  // 设置文件夹路径（展开状态按 expandKey 记忆：维度字段节点用它区分「同字段挂在不同目录」）
+  const dimensionQuery = (node as unknown as { dimensionQuery?: string }).dimensionQuery
+  const expandKey = (node as unknown as { expandKey?: string }).expandKey ?? node.slug
   const folderPath = node.slug
-  folderContainer.dataset.folderpath = folderPath
+  folderContainer.dataset.folderpath = expandKey
+  if (dimensionQuery) li.classList.add("dimension-field-node")
 
   // 设置缩进
   const indentPx = level * 20
@@ -215,8 +349,10 @@ function createSimpleFolderNode(
   if (opts.folderClickBehavior === "link") {
     const button = titleContainer.querySelector(".folder3-button") as HTMLElement
     const a = document.createElement("a")
-    // 使用 basePath 生成链接（支持子路径部署）
-    a.href = getHref(folderPath)
+    // 使用 basePath 生成链接（支持子路径部署）；维度字段节点额外带 ?scope=<目录>
+    a.href = dimensionQuery
+      ? getDimensionHref(folderPath, dimensionQuery)
+      : getHref(folderPath)
     a.dataset.for = folderPath
     a.textContent = node.displayName
 
@@ -235,8 +371,8 @@ function createSimpleFolderNode(
     }
   }
 
-  // 设置展开状态（根据 expandedFolders）
-  const isExpanded = expandedFolders.has(folderPath)
+  // 设置展开状态（根据 expandedFolders；维度字段节点按 expandKey）
+  const isExpanded = expandedFolders.has(expandKey)
   if (isExpanded) {
     folderOuter.classList.add("open")
   } else {
@@ -330,6 +466,19 @@ function locateCurrentFile() {
 // 如果修改此处，请同步修改 explorer3.scss 中的 li { height: 28px }
 const DEFAULT_ITEM_HEIGHT = 38
 
+/**
+ * 祖先目录 → 展开键（= 真实文件夹的 slug，形如 `<目录>/index`）。
+ *
+ * 展开状态与 trie 的门控都按文件夹 slug（带 `/index`）记；而由「当前页面 slug」逐段拼出来的
+ * 祖先路径是**不带** `/index` 的（如内容页 `任务/a` → `任务`）→ 永远命中不了，
+ * 于是打开内容页时所在目录不会自动展开。这里做一次映射把两者对齐。
+ */
+function folderKeyIndex(validFolders: Set<string>): Map<string, string> {
+  const index = new Map<string, string>()
+  for (const path of validFolders) index.set(path.replace(/\/index$/, ""), path)
+  return index
+}
+
 // ========== 步骤 2：状态管理函数 ==========
 
 /**
@@ -396,8 +545,9 @@ function flattenTree(
 
   result.push(flatNode)
 
-  // 只在文件夹展开时递归子节点
-  if (node.isFolder && expandedFolders.has(node.slug)) {
+  // 只在文件夹展开时递归子节点（维度字段节点用 expandKey 区分「同字段挂在不同目录」）
+  const expandKey = (node as unknown as { expandKey?: string }).expandKey ?? node.slug
+  if (node.isFolder && expandedFolders.has(expandKey)) {
     node.children.forEach((child) => {
       flattenTree(child, level + 1, node.slug, result)
     })
@@ -1023,6 +1173,19 @@ async function initializeFileTree(opts: ParsedOptions): Promise<FileTrieNode> {
   }
   performance.mark("filterMapSort-end")
 
+  // 动态分类：把「维度 → 取值」作为虚拟子节点挂到目录上。
+  // 依赖站点级产物（static/aggregation.json + graph/dimensions/index.json），缺失时静默跳过。
+  if (opts.dimensionFolders) {
+    const dimensionEntries: DimensionEntry[] = entries
+      .filter(([, entry]) => !(entry as { frontmatter?: { virtualNode?: unknown } }).frontmatter?.virtualNode)
+      .map(([slug, entry]) => ({
+        slug,
+        frontmatter: (entry as { frontmatter?: Record<string, unknown> }).frontmatter,
+      }))
+    const injected = await injectDimensionNodes(trie, dimensionEntries, opts.dimensionMaxValues)
+    if (injected > 0) console.log(`[explorer3] 动态分类：注入 ${injected} 个维度字段节点`)
+  }
+
   performance.mark("initializeFileTree-end")
   performance.measure("initializeFileTree-total", "initializeFileTree-start", "initializeFileTree-end")
 
@@ -1122,6 +1285,8 @@ async function setupExplorer3(currentSlug: FullSlug) {
       useSavedState: explorer.dataset.savestate === "true",
       virtualScrollWindowSize: parseInt(explorer.dataset.virtualscrollwindowsize || "50"),
       hideFiles: explorer.dataset.hidefiles === "true",
+      dimensionFolders: explorer.dataset.dimensionfolders === "true",
+      dimensionMaxValues: parseInt(explorer.dataset.dimensionmaxvalues || "20", 10),
       order: dataFns.order || ["filter", "map", "sort"],
       sortFn: new Function("return " + (dataFns.sortFn || "undefined"))(),
       filterFn: new Function("return " + (dataFns.filterFn || "undefined"))(),
@@ -1151,14 +1316,16 @@ async function setupExplorer3(currentSlug: FullSlug) {
 
       const trie = currentTrie
       const validFolders = new Set(trie.getFolderPaths())
+      const folderKeys = folderKeyIndex(validFolders)
 
       // 1. 自动展开当前路径的父文件夹
       const currentPathParts = currentSlug.split("/")
       let modifiedExpanded = false
       for (let i = 1; i <= currentPathParts.length; i++) {
-        const ancestorPath = currentPathParts.slice(0, i).join("/") as FullSlug
-        if (validFolders.has(ancestorPath) && !expandedFolders.has(ancestorPath)) {
-          expandedFolders.add(ancestorPath)
+        const ancestorPath = currentPathParts.slice(0, i).join("/")
+        const folderKey = folderKeys.get(ancestorPath)
+        if (folderKey && !expandedFolders.has(folderKey)) {
+          expandedFolders.add(folderKey)
           modifiedExpanded = true
         }
       }
@@ -1231,9 +1398,11 @@ async function setupExplorer3(currentSlug: FullSlug) {
         }
 
         const currentPathParts = currentSlug.split("/")
+        const folderKeys = folderKeyIndex(validFolders)
         for (let i = 1; i <= currentPathParts.length; i++) {
-          const ancestorPath = currentPathParts.slice(0, i).join("/") as FullSlug
-          if (validFolders.has(ancestorPath)) expandedFolders.add(ancestorPath)
+          const ancestorPath = currentPathParts.slice(0, i).join("/")
+          const folderKey = folderKeys.get(ancestorPath)
+          if (folderKey) expandedFolders.add(folderKey)
         }
 
         flatNodes = flattenTreeRoot(currentTrie)
@@ -1273,9 +1442,11 @@ async function setupExplorer3(currentSlug: FullSlug) {
     }
 
     const currentPathParts = currentSlug.split("/")
+    const folderKeys = folderKeyIndex(validFolders)
     for (let i = 1; i <= currentPathParts.length; i++) {
-      const ancestorPath = currentPathParts.slice(0, i).join("/") as FullSlug
-      if (validFolders.has(ancestorPath)) expandedFolders.add(ancestorPath)
+      const ancestorPath = currentPathParts.slice(0, i).join("/")
+      const folderKey = folderKeys.get(ancestorPath)
+      if (folderKey) expandedFolders.add(folderKey)
     }
 
     if (opts.useSavedState) saveExpandedState()

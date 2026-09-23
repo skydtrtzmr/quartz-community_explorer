@@ -154,6 +154,10 @@ export interface Options {
   hideFiles: boolean
   // 屏蔽路径前缀（相对内容根，如系统目录 `_dimensions`）：命中的节点整枝不显示
   excludePathPrefixes: string[]
+  // 动态分类：在目录下挂「维度 → 取值」子节点（需站点配置了 configuration.aggregation）
+  dimensionFolders: boolean
+  // 动态分类：单字段最多展示的取值数（超出显示「… (N)」，点击进字段索引页）
+  dimensionMaxValues: number
   // 排序配置（YAML options.sort 透传；按 frontmatter 字段排序依赖 content-index-pro 写入的 frontmatter）
   sort?: SortConfig
   sortFn: (a: FileTrieNode, b: FileTrieNode) => number
@@ -169,6 +173,8 @@ const defaultOptions: Options = {
   virtualScrollWindowSize: 50, // 每次渲染 50 个节点
   hideFiles: false,
   excludePathPrefixes: [],
+  dimensionFolders: false,
+  dimensionMaxValues: 20,
   mapFn: (node) => {
         return node
     },
@@ -240,6 +246,8 @@ export default ((userOpts?: Partial<Options>) => {
                 data-savestate={options.useSavedState}
                 data-virtualscrollwindowsize={options.virtualScrollWindowSize}
                 data-hidefiles={options.hideFiles}
+                data-dimensionfolders={String(options.dimensionFolders)}
+                data-dimensionmaxvalues={String(options.dimensionMaxValues)}
                 data-basepath={basePath}
                 data-data-fns={JSON.stringify({
                     order: options.order,

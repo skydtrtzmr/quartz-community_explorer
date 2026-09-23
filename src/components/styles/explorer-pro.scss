@@ -557,3 +557,25 @@ li:has(> .folder3-outer.open) > .folder3-container > svg {
   // 常驻滚动条空间，避免滚动条显示/隐藏时布局抖动
   scrollbar-gutter: stable;
 }
+// ========== 动态分类节点（目录 → 维度 → 取值）==========
+// 由 explorer-pro.inline.ts 按站点 aggregation 规则挂到目录下，链接均带 ?scope=<目录>。
+// 用次要色区分「动态算出来的分类」与真实文件/文件夹。
+li.dimension-field-node {
+  & > .folder3-container {
+    .folder3-title,
+    a[data-for] {
+      color: var(--secondary);
+      opacity: 0.9;
+    }
+  }
+}
+
+li.dimension-value-node > a.file-link {
+  color: var(--secondary);
+  opacity: 0.75;
+  font-size: calc(var(--explorer-file-font-size, 1rem) * 0.95);
+
+  &:hover {
+    opacity: 1;
+  }
+}
