@@ -152,6 +152,8 @@ export interface Options {
   virtualScrollWindowSize: number
   // 隐藏末级文件：只显示文件夹（当前文件的祖先文件夹仍会高亮）
   hideFiles: boolean
+  // 屏蔽路径前缀（相对内容根，如系统目录 `_dimensions`）：命中的节点整枝不显示
+  excludePathPrefixes: string[]
   // 排序配置（YAML options.sort 透传；按 frontmatter 字段排序依赖 content-index-pro 写入的 frontmatter）
   sort?: SortConfig
   sortFn: (a: FileTrieNode, b: FileTrieNode) => number
@@ -166,6 +168,7 @@ const defaultOptions: Options = {
   useSavedState: true,
   virtualScrollWindowSize: 50, // 每次渲染 50 个节点
   hideFiles: false,
+  excludePathPrefixes: [],
   mapFn: (node) => {
         return node
     },
@@ -211,6 +214,18 @@ export default ((userOpts?: Partial<Options>) => {
         ? generateSortFnCode(options.sort)
         : options.sortFn.toString()
 
+    // filterFn 是函数、无法直接由 YAML 表达，因此把「屏蔽路径前缀」**内联**进序列化代码：
+    // 浏览器端执行同一份判断（插件运行时也是 new Function(序列化代码)）。
+    const excludePathPrefixes = options.excludePathPrefixes ?? []
+    const filterFnCode = `(function(node) {
+  if (!(${options.filterFn.toString()})(node)) return false;
+  var excludes = ${JSON.stringify(excludePathPrefixes)};
+  for (var i = 0; i < excludes.length; i++) {
+    if (String(node.slug).indexOf(excludes[i]) === 0) return false;
+  }
+  return true;
+})`
+
     const { OverflowList, overflowListAfterDOMLoaded } = OverflowListFactory()
 
     const Explorer: QuartzComponent = ({ cfg, displayClass }: QuartzComponentProps) => {
@@ -229,7 +244,7 @@ export default ((userOpts?: Partial<Options>) => {
                 data-data-fns={JSON.stringify({
                     order: options.order,
                     sortFn: sortFnCode,
-                    filterFn: options.filterFn.toString(),
+                    filterFn: filterFnCode,
                     mapFn: options.mapFn.toString(),
                 })}
             >
