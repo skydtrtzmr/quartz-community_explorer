@@ -171,22 +171,32 @@ function partitionValueToTrie(
   hideFiles: boolean,
   childBySlug: Map<string, FileTrieNode>,
   parentKey: string,
+  ancestors: Array<{ field: string; value: string }> = [],
 ): FileTrieNode {
   const key = `${parentKey}/${node.fieldSlug}=${node.value}`
+  const nextAncestors = [...ancestors, { field: node.field, value: node.value }]
   const childValueNodes = node.children.map((child) =>
-    partitionValueToTrie(child, folder, hideFiles, childBySlug, key),
+    partitionValueToTrie(child, folder, hideFiles, childBySlug, key, nextAncestors),
   )
   const memberNodes = hideFiles
     ? []
     : node.members
         .map((slug) => childBySlug.get(slug))
         .filter((child): child is FileTrieNode => child !== undefined)
+
+  // 祖先维度约束：当前节点的字段值已在 URL 路径里（`/_dimensions/<field>/<value>`），
+  // 所以 filter 只带**祖先**（不含自己）。一级节点 ancestors 为空 → 无 filter。
+  const filter =
+    ancestors.length > 0
+      ? `&filter=${encodeURIComponent(ancestors.map((a) => `${a.field}:${a.value}`).join(","))}`
+      : ""
+
   const trie = {
     isFolder: !hideFiles || childValueNodes.length > 0,
     slug: node.slug,
     expandKey: `dimval:${folder}:${key}`,
     displayName: `${node.value} (${node.count})`,
-    dimensionQuery: `?scope=${encodeURIComponent(folder)}`,
+    dimensionQuery: `?scope=${encodeURIComponent(folder)}${filter}`,
     children: [...childValueNodes, ...memberNodes],
   }
   return trie as unknown as FileTrieNode
