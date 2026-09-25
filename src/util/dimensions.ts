@@ -211,11 +211,20 @@ function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0
 }
 
-/** 与 aggregation-page-pro 的 firstValue 同款：数组取第一个「有值」的元素 */
+/** 把 `[[target]]` / `[[target|display]]` 剥离为纯文本（display 优先，否则 target） */
+function stripWikilink(value: string): string {
+  const match = value.match(/^\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]$/)
+  if (!match) return value
+  const target = match[1] ?? ""
+  const display = match[2] ?? ""
+  return display.trim() || target.trim()
+}
+
+/** 与 aggregation-page-pro 的 firstValue 同款：数组取第一个「有值」的元素；wikilink 值剥离为纯文本 */
 function firstValue(raw: unknown): string | null {
   const present = (v: unknown) => v !== undefined && v !== null && v !== ""
   const value = Array.isArray(raw) ? raw.find(present) : present(raw) ? raw : undefined
-  return value === undefined ? null : String(value)
+  return value === undefined ? null : stripWikilink(String(value))
 }
 
 /** 目录 → 聚合上下文：按 root.depth 截断（根目录为 "/"） */
