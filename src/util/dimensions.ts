@@ -53,6 +53,15 @@ export interface DimensionFieldNode {
 /** 与 aggregation-page-pro 的 DIMENSIONS_PREFIX 保持一致 */
 export const DIMENSIONS_PREFIX = "_dimensions"
 
+/**
+ * frontmatter 字段缺值（缺失 / 空串 / 空数组）时的取值名。
+ *
+ * ⚠️ 跨插件字符串契约：必须与 graph-pro 的 `UNCLASSIFIED_KEY`、aggregation-page-pro 的
+ * `UNCLASSIFIED_VALUE` **逐字符一致** —— 目录树里「未分类」节点的可跳转 slug 取自 manifest，
+ * 与图谱「未分类」聚合节点指向同一维度值页。插件之间不能共享包，故各自定义并以单测断言字面量。
+ */
+export const UNCLASSIFIED_VALUE = "未分类"
+
 // ========== 用户配置的「目录内聚合层级」==========
 // 约定：候选字段只能是该目录规则链上的字段（维度页是构建期产物）；
 // 用户配置 = 字段名数组（优先级从高到低），只有**前 maxLevels 个**真正参与分区。
@@ -131,7 +140,7 @@ export interface DimensionPartition {
  * - 本函数：**直属子项**口径的归属，用于把取值渲染成"装着子文件的子文件夹"
  *
  * 只按第一个有取值的字段分区，是因为一个子项只能待在一个子文件夹里（不能同时归到两个维度）；
- * 其余维度仍以链接节点形式提供入口。分不到任何取值的子项（属性为空/未分类/超出上限）留在目录下。
+ * 其余维度仍以链接节点形式提供入口。属性为空则归入「未分类」取值；取值不在清单/超出上限仍留在目录下。
  */
 export function planFolderPartition(
   entries: DimensionEntry[],
@@ -166,8 +175,8 @@ export function planFolderPartition(
     const buckets = new Map<string, string[]>()
     let assigned = 0
     for (const slug of childSlugs) {
-      const value = firstValue(frontmatterBySlug.get(slug)?.[field])
-      if (value === null) continue
+      // 缺值归入「未分类」取值（清单里没有该取值时下面的检查兜回落 unassigned）
+      const value = firstValue(frontmatterBySlug.get(slug)?.[field]) ?? UNCLASSIFIED_VALUE
       const valueSlug = valueSlugs.get(value)
       if (valueSlug === undefined) continue
       const bucket = buckets.get(value) ?? []
@@ -286,8 +295,7 @@ export function planFolderDimensions(
   const counts = new Map<string, Map<string, number>>()
   for (const entry of scoped) {
     for (const field of chain) {
-      const value = firstValue(entry.frontmatter?.[field])
-      if (value === null) continue
+      const value = firstValue(entry.frontmatter?.[field]) ?? UNCLASSIFIED_VALUE
       const slug = manifestByField.get(field)?.get(value)
       if (slug === undefined) continue // 清单里没有（字段被 maxValuesPerField 跳过等）→ 不挂节点
       const byValue = counts.get(field) ?? new Map<string, number>()
@@ -377,14 +385,11 @@ function partitionLevel(
   const buckets = new Map<string, string[]>()
   const leftovers: string[] = []
   for (const slug of items) {
-    const value = firstValue(frontmatter.get(slug)?.[field])
-    if (value === null) {
-      leftovers.push(slug) // 属性为空 → 留在本层父节点
-      continue
-    }
+    // 缺值不是「留在本层」，而是归入「未分类」取值（清单里没有该取值时下面的检查兜回落 leftover）
+    const value = firstValue(frontmatter.get(slug)?.[field]) ?? UNCLASSIFIED_VALUE
     const valueSlug = valueSlugs.get(value)
     if (valueSlug === undefined) {
-      leftovers.push(slug) // 取值不在清单里（字段被上限跳过等）→ 同样留在本层父节点
+      leftovers.push(slug) // 取值不在清单里（字段被上限跳过等）→ 留在本层父节点
       continue
     }
     const bucket = buckets.get(value) ?? []
@@ -426,7 +431,7 @@ function partitionLevel(
  * 目录直属子项的多层嵌套分区。
  *
  * - `order` 由调用方给出（`resolveDimensionOrder(链, 用户配置, 上限)`），本函数不再做截断
- * - 每一层都遵循"文件不丢"：属性为空/取值不在清单/超上限 → 留在该层父节点
+ * - 每一层都遵循"文件不丢"：属性为空 → 归入「未分类」取值；取值不在清单/超上限 → 留在该层父节点
  * - 最深层级的取值节点用 `members` 收纳剩余成员；中间层级用 `children` 继续分叉
  */
 export function planNestedPartition(

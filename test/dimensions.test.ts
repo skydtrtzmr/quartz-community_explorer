@@ -8,6 +8,7 @@ import {
   planFolderPartition,
   planNestedPartition,
   resolveDimensionOrder,
+  UNCLASSIFIED_VALUE,
   type DimensionEntry,
 } from "../src/util/dimensions"
 
@@ -181,6 +182,69 @@ describe("目录直属子项分区（planFolderPartition）", () => {
     expect(planFolderPartition(withExtra, shared, manifest, "问答", children)).toBeNull()
     expect(planFolderPartition(withExtra, shared, manifest, "任务", [])).toBeNull()
     expect(planFolderPartition(withExtra, null, manifest, "任务", children)).toBeNull()
+  })
+})
+
+describe("未分类取值（缺值归入取值，而非留在目录下）", () => {
+  it("常量字面量与图谱 / 维度页契约一致", () => {
+    expect(UNCLASSIFIED_VALUE).toBe("未分类")
+  })
+
+  // 模拟 aggregation-page-pro 产出的含「未分类」的 manifest
+  const manifestWithUnclassified = {
+    version: 1,
+    fields: [
+      {
+        field: "status",
+        fieldSlug: "status",
+        values: [
+          { value: "进行中", valueSlug: "进行中" },
+          { value: "未分类", valueSlug: "未分类" },
+        ],
+      },
+    ],
+  }
+  const scoped: DimensionEntry[] = [
+    entry("任务/t1", { status: "进行中" }),
+    entry("任务/t2", {}), // 缺 status → 未分类
+    entry("任务/t3", { status: "清单外" }), // 取值不在清单 → 仍留目录下
+  ]
+  const scopedChildren = ["任务/t1", "任务/t2", "任务/t3"]
+
+  it("planFolderDimensions：缺值挂到可跳转的未分类叶子", () => {
+    const nodes = planFolderDimensions(scoped, shared, manifestWithUnclassified, "任务")
+    const unclassified = nodes[0]!.values.find((value) => value.value === UNCLASSIFIED_VALUE)!
+    expect(unclassified.slug).toBe("_dimensions/status/未分类")
+    expect(unclassified.count).toBe(1)
+  })
+
+  it("planNestedPartition：缺值进入未分类取值，不落 leftover", () => {
+    const partition = planNestedPartition(
+      scoped,
+      shared,
+      manifestWithUnclassified,
+      "任务",
+      scopedChildren,
+      ["status"],
+    )!
+    const byValue = new Map(partition.values.map((value) => [value.value, value]))
+    expect(byValue.get(UNCLASSIFIED_VALUE)!.members).toEqual(["任务/t2"])
+    expect(byValue.get(UNCLASSIFIED_VALUE)!.slug).toBe("_dimensions/status/未分类")
+    // 清单外取值仍回落 leftover（文件不丢）
+    expect(partition.leftovers).toEqual(["任务/t3"])
+  })
+
+  it("planFolderPartition：缺值进入未分类取值，不再回落 unassigned", () => {
+    const partition = planFolderPartition(
+      scoped,
+      shared,
+      manifestWithUnclassified,
+      "任务",
+      scopedChildren,
+    )!
+    const byValue = new Map(partition.values.map((value) => [value.value, value]))
+    expect(byValue.get(UNCLASSIFIED_VALUE)!.members).toEqual(["任务/t2"])
+    expect(partition.unassigned).toEqual(["任务/t3"])
   })
 })
 
