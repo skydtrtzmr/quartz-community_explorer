@@ -155,6 +155,39 @@ export class FileTrieNode<T extends FileTrieData = ContentIndexEntry> {
     this.children.forEach((e) => e.sort(sortFn))
   }
 
+  /** Resolve a field from this parent folder before sorting its direct children. */
+  sortByFolderFields(config: { default: string; folders: Record<string, string> }) {
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
+    const folder = this.slugSegments.join("/")
+    let current = folder
+    let field = config.default
+    while (current) {
+      if (Object.prototype.hasOwnProperty.call(config.folders, current)) {
+        field = config.folders[current]
+        break
+      }
+      const idx = current.lastIndexOf("/")
+      current = idx < 0 ? "" : current.slice(0, idx)
+    }
+    this.children.sort((a, b) => {
+      if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1
+      const value = (node: FileTrieNode<T>): unknown => {
+        const frontmatter = (node.data as ContentIndexEntry | null)?.frontmatter
+        return field === "title" ? frontmatter?.title ?? node.displayName : frontmatter?.[field]
+      }
+      const av = value(a), bv = value(b)
+      const missingA = av === undefined || av === null || av === ""
+      const missingB = bv === undefined || bv === null || bv === ""
+      if (missingA !== missingB) return missingA ? 1 : -1
+      if (!missingA && !missingB) {
+        const result = typeof av === "number" && typeof bv === "number" ? av - bv : collator.compare(String(av), String(bv))
+        if (result) return result
+      }
+      return collator.compare(a.displayName, b.displayName) || collator.compare(a.slug, b.slug)
+    })
+    this.children.forEach((child) => child.sortByFolderFields(config))
+  }
+
   static fromEntries<T extends FileTrieData>(entries: [FullSlug, T][]) {
     const trie = new FileTrieNode<T>([])
     entries.forEach(([, entry]) => trie.add(entry))

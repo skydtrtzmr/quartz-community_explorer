@@ -42,6 +42,7 @@ interface ParsedOptions {
   dimensionMaxValues: number // 单字段最多展示的取值数
   dimensionMaxLevels: number // 最多应用几级维度（用户拖动的顺序只取前 N 项）
   sortFn: (a: FileTrieNode, b: FileTrieNode) => number
+  sortFields?: { default: string; folders: Record<string, string> }
   filterFn: (node: FileTrieNode) => boolean
   mapFn: (node: FileTrieNode) => void
   order: "sort" | "filter" | "map"[]
@@ -1298,7 +1299,7 @@ async function initializeFileTree(opts: ParsedOptions): Promise<FileTrieNode> {
     switch (fn) {
       case "filter": if (opts.filterFn) trie.filter(opts.filterFn); break
       case "map": if (opts.mapFn) trie.map(opts.mapFn); break
-      case "sort": if (opts.sortFn) trie.sort(opts.sortFn); break
+      case "sort": if (opts.sortFields) trie.sortByFolderFields(opts.sortFields); else if (opts.sortFn) trie.sort(opts.sortFn); break
     }
   }
   performance.mark("filterMapSort-end")
@@ -1420,6 +1421,7 @@ async function setupExplorer3(currentSlug: FullSlug) {
       dimensionMaxLevels: parseInt(explorer.dataset.dimensionmaxlevels || "2", 10),
       order: dataFns.order || ["filter", "map", "sort"],
       sortFn: new Function("return " + (dataFns.sortFn || "undefined"))(),
+      sortFields: dataFns.sortFields,
       filterFn: new Function("return " + (dataFns.filterFn || "undefined"))(),
       mapFn: new Function("return " + (dataFns.mapFn || "undefined"))(),
     }

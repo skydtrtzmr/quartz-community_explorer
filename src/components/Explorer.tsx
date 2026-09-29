@@ -162,6 +162,7 @@ export interface Options {
   dimensionMaxLevels: number
   // 排序配置（YAML options.sort 透传；按 frontmatter 字段排序依赖 content-index-pro 写入的 frontmatter）
   sort?: SortConfig
+  sortFields?: { default: string; folders: Record<string, string> }
   sortFn: (a: FileTrieNode, b: FileTrieNode) => number
   filterFn: (node: FileTrieNode) => boolean
   mapFn: (node: FileTrieNode) => void
@@ -256,6 +257,7 @@ export default ((userOpts?: Partial<Options>) => {
                 data-data-fns={JSON.stringify({
                     order: options.order,
                     sortFn: sortFnCode,
+                    sortFields: options.sortFields,
                     filterFn: filterFnCode,
                     mapFn: options.mapFn.toString(),
                 })}
