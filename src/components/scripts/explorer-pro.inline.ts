@@ -1548,6 +1548,15 @@ async function setupExplorer3(currentSlug: FullSlug) {
         flatNodes = flattenTreeRoot(currentTrie)
         if (opts.useSavedState) saveExpandedState()
 
+        // ⚠️ 快照是「上次 prenav 保存的 DOM」，可能早于面板里的聚合层级变更
+        // （prenav 只在离开页面时落盘；面板改完只重绘了当时的 DOM，不更新快照）。
+        // 本分支此前只重建 Trie、从不重绘 → 刷新后一直显示旧分类，直到用户点一下
+        // 触发 refreshFlatExplorer。这里在 Trie 就绪后按数据重绘一次
+        // （缓存仍负责「首屏先出现」，重绘紧随其后）。
+        currentActiveSlug = currentSlug
+        const cachedScrollTop = parseInt(sessionStorage.getItem("explorer3ScrollTop") || "0")
+        renderFlatExplorer(explorerUl, currentSlug, opts, cachedScrollTop)
+
         setupFlatVirtualScroll(explorerUl, currentSlug, opts)
         isNavigating = false
 
