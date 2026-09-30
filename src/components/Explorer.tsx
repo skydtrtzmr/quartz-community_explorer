@@ -8,7 +8,7 @@ import style from "./styles/explorer-pro.scss"
 import script from "./scripts/explorer-pro.inline.ts"
 import { classNames } from "../util/lang"
 import { i18n } from "../i18n"
-import type { FileTrieNode } from "../util/fileTrie"
+import type { FileTrieNode, FolderSortFields } from "../util/fileTrie"
 import OverflowListFactory from "./OverflowList"
 import type { SortConfig } from "../util/sort"
 import { applySortDefaults } from "../util/sort"
@@ -162,7 +162,7 @@ export interface Options {
   dimensionMaxLevels: number
   // 排序配置（YAML options.sort 透传；按 frontmatter 字段排序依赖 content-index-pro 写入的 frontmatter）
   sort?: SortConfig
-  sortFields?: { default: string; folders: Record<string, string> }
+  sortFields?: FolderSortFields
   sortFn: (a: FileTrieNode, b: FileTrieNode) => number
   filterFn: (node: FileTrieNode) => boolean
   mapFn: (node: FileTrieNode) => void

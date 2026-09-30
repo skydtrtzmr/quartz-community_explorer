@@ -1,4 +1,4 @@
-import { FileTrieNode, type ContentIndexEntry } from "../../util/fileTrie"
+import { FileTrieNode, type ContentIndexEntry, type FolderSortFields } from "../../util/fileTrie"
 import {
   contextOfFolder,
   fieldChain,
@@ -42,7 +42,7 @@ interface ParsedOptions {
   dimensionMaxValues: number // 单字段最多展示的取值数
   dimensionMaxLevels: number // 最多应用几级维度（用户拖动的顺序只取前 N 项）
   sortFn: (a: FileTrieNode, b: FileTrieNode) => number
-  sortFields?: { default: string; folders: Record<string, string> }
+  sortFields?: FolderSortFields
   filterFn: (node: FileTrieNode) => boolean
   mapFn: (node: FileTrieNode) => void
   order: "sort" | "filter" | "map"[]
