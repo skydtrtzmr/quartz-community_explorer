@@ -196,7 +196,7 @@ function partitionValueToTrie(
     isFolder: !hideFiles || childValueNodes.length > 0,
     slug: node.slug,
     expandKey: `dimval:${folder}:${key}`,
-    displayName: `${node.value} (${node.count})`,
+    displayName: `${node.field}: ${node.value} (${node.count})`,
     dimensionQuery: `?scope=${encodeURIComponent(folder)}${filter}`,
     children: [...childValueNodes, ...memberNodes],
   }

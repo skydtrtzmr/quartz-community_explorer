@@ -1,5 +1,19 @@
 // 插件独立编译，引不到主仓 variables.scss：断点改为字面量（$mobile = max-width: 800px）
 
+// 左栏给多层分类留出横向空间，同时收紧两侧留白；右栏仍沿用宿主的 320px。
+@media all and (min-width: 1200px) {
+  :root:not([reader-mode="on"]) .page > #quartz-body:has(.sidebar.left .explorer3) {
+    grid-template-columns: 360px minmax(0, 1fr) 320px;
+  }
+}
+
+@media all and (min-width: 801px) {
+  .page > #quartz-body .sidebar.left:has(.explorer3) {
+    padding-left: 1rem;
+    padding-right: 0.75rem;
+  }
+}
+
 @media all and (max-width: 800px) {
   .page > #quartz-body {
     // Shift page position when toggling Explorer on mobile.
