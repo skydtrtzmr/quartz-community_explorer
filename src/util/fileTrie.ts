@@ -13,6 +13,7 @@ export interface ContentIndexEntry {
   tags?: string[]
   content?: string
   frontmatter?: Record<string, unknown>
+  virtualNode?: boolean
   [key: string]: unknown
 }
 

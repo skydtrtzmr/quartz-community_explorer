@@ -1286,7 +1286,11 @@ async function initializeFileTree(opts: ParsedOptions): Promise<FileTrieNode> {
   performance.mark("fetchData-end")
 
   performance.mark("buildTrie-start")
-  const entries = Object.entries(data) as unknown as [FullSlug, ContentIndexEntry][]
+  // Generated placeholders stay in the content index for links, search and graphs,
+  // but should never create file or folder nodes in the Explorer.
+  const entries = (Object.entries(data) as unknown as [FullSlug, ContentIndexEntry][]).filter(
+    ([, entry]) => entry.virtualNode !== true,
+  )
   const trie = FileTrieNode.fromEntries(entries)
   if (opts.hideFiles) {
     // 隐藏末级文件：只保留文件夹节点（当前文件的祖先文件夹在渲染时仍会高亮）
@@ -1308,7 +1312,7 @@ async function initializeFileTree(opts: ParsedOptions): Promise<FileTrieNode> {
   // 依赖站点级产物（static/aggregation.json + graph/dimensions/index.json），缺失时静默跳过。
   if (opts.dimensionFolders) {
     const dimensionEntries: DimensionEntry[] = entries
-      .filter(([, entry]) => !(entry as { frontmatter?: { virtualNode?: unknown } }).frontmatter?.virtualNode)
+      .filter(([, entry]) => !entry.frontmatter?.virtualNode)
       .map(([slug, entry]) => ({
         slug,
         frontmatter: (entry as { frontmatter?: Record<string, unknown> }).frontmatter,
