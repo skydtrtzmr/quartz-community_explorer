@@ -186,6 +186,25 @@ describe("目录直属子项分区（planFolderPartition）", () => {
 })
 
 describe("未分类取值（缺值归入取值，而非留在目录下）", () => {
+  it("目录树的平铺、只显示目录及多级分区均将未分类放最后", () => {
+    const source = [
+      entry("任务/a", { status: "进行中", type: "产品研发" }),
+      ...[1, 2, 3].map(i => entry(`任务/typed-${i}`, { status: "进行中" })),
+      ...[1, 2, 3, 4, 5].map(i => entry(`任务/missing-${i}`)),
+    ]
+    const data = { ...manifest, fields: manifest.fields.map(field => ({ ...field,
+      values: [...field.values, { value: UNCLASSIFIED_VALUE, valueSlug: UNCLASSIFIED_VALUE }],
+    })) }
+    const rules = { root: { depth: 1 }, resolved: { 任务: [
+      { type: "field", field: "status" }, { type: "field", field: "type" },
+    ] } }
+    const expected = ["进行中", "未分类"]
+    expect(planFolderDimensions(source, rules, data, "任务")[0].values.map(value => value.value)).toEqual(expected)
+    expect(planFolderPartition(source, rules, data, "任务", source.map(item => item.slug))?.values.map(value => value.value)).toEqual(expected)
+    const partition = planNestedPartition(source, rules, data, "任务", source.map(item => item.slug), ["status", "type"])!
+    expect(partition.values.map(value => value.value)).toEqual(expected)
+    expect(partition.values[0].children.map(value => value.value)).toEqual(["产品研发", "未分类"])
+  })
   it("常量字面量与图谱 / 维度页契约一致", () => {
     expect(UNCLASSIFIED_VALUE).toBe("未分类")
   })

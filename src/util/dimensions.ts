@@ -62,6 +62,10 @@ export const DIMENSIONS_PREFIX = "_dimensions"
  */
 export const UNCLASSIFIED_VALUE = "未分类"
 
+function unclassifiedLast(a: string, b: string): number {
+  return Number(a === UNCLASSIFIED_VALUE) - Number(b === UNCLASSIFIED_VALUE)
+}
+
 // ========== 用户配置的「目录内聚合层级」==========
 // 约定：候选字段只能是该目录规则链上的字段（维度页是构建期产物）；
 // 用户配置 = 字段名数组（优先级从高到低），只有**前 maxLevels 个**真正参与分区。
@@ -194,7 +198,7 @@ export function planFolderPartition(
         count: members.length,
         slug: `${DIMENSIONS_PREFIX}/${fieldSlug}/${valueSlugs.get(value)!}`,
       }))
-      .sort((a, b) => b.count - a.count || compareStrings(a.value, b.value))
+      .sort((a, b) => unclassifiedLast(a.value, b.value) || b.count - a.count || compareStrings(a.value, b.value))
 
     const shown = all.slice(0, maxValues)
     const shownSlugs = new Set(shown.flatMap((entry) => entry.members))
@@ -318,7 +322,7 @@ export function planFolderDimensions(
         count,
         slug: `${DIMENSIONS_PREFIX}/${fieldSlug}/${manifestByField.get(field)!.get(value)!}`,
       }))
-      .sort((a, b) => b.count - a.count || compareStrings(a.value, b.value))
+      .sort((a, b) => unclassifiedLast(a.value, b.value) || b.count - a.count || compareStrings(a.value, b.value))
     nodes.push({
       field,
       fieldSlug,
@@ -400,7 +404,7 @@ function partitionLevel(
 
   const fieldSlug = fieldSlugs.get(field) ?? slugifyPath(field)
   const sorted = [...buckets.entries()].sort(
-    (a, b) => b[1].length - a[1].length || compareStrings(a[0], b[0]),
+    (a, b) => unclassifiedLast(a[0], b[0]) || b[1].length - a[1].length || compareStrings(a[0], b[0]),
   )
   const shown = sorted.slice(0, maxValues)
   const hidden = sorted.slice(maxValues)
