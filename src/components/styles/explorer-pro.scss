@@ -337,6 +337,11 @@ button.desktop-explorer {
   }
 
   // 文件夹链接样式（folderClickBehavior="link" 时）
+  & > div {
+    flex: 1;
+    min-width: 0;
+  }
+
   & div > a {
     color: var(--secondary);
     font-family: var(--headerFont);
@@ -347,7 +352,9 @@ button.desktop-explorer {
     padding: 0 0.75rem;
     padding-right: 0.5rem;
     text-decoration: none;
-    position: relative;
+    // Stretch the native link hit area to the entire row, including indentation.
+    // The arrow is stacked above it and keeps its own expand/collapse behavior.
+    position: static;
     flex: 1;
     transition: color 0.15s ease;
     // 文本溢出处理：单行显示，超出省略
@@ -355,6 +362,12 @@ button.desktop-explorer {
     overflow: hidden;
     text-overflow: ellipsis;
     box-sizing: border-box;
+
+    &::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+    }
 
     // 文件夹被选中：左侧粗竖线
     &.active {
@@ -435,6 +448,8 @@ button.desktop-explorer {
 }
 
 .folder3-icon {
+  position: relative;
+  z-index: 1;
   color: var(--secondary);
   cursor: pointer;
   transition: transform 0.3s ease;
